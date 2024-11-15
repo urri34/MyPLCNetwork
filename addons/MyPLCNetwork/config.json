@@ -1,7 +1,7 @@
 {
   "name": "My PLC Network",
   "version": "1.0.0",
-  "slug": "MyPLCNetwork",
+  "slug": "my_plc_network",
   "description": "An Addon to visualize and monitor your PLC network.",
   "arch": ["amd64", "armv7", "armhf", "aarch64"],
   "startup": "application",
