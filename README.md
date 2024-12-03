@@ -1,3 +1,4 @@
+```
 Elements=[
   { 'mac': '30:D3:2D:5E:3E:85',
     'sensor_name': 'PLCSaleta',
@@ -43,4 +44,5 @@ Elements=[
     'tx': 0,
     'rx': 0,
     'status': 'off'}
-  ]
+]
+```
