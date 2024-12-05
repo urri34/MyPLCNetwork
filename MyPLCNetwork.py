@@ -1,24 +1,30 @@
 #!python.exe
 # -*- coding: utf-8 -*-
-from logging import DEBUG, INFO, WARNING, ERROR, CRITICAL, getLogger, Formatter, FileHandler, StreamHandler
-import subprocess
-import configparser
-from sys import _getframe
+from configparser import ConfigParser
+from diagrams import Diagram, Edge, Cluster
+from diagrams.aws.compute import EC2
+from diagrams.aws.network import ELB
+from json import dumps
+from logging import DEBUG, INFO, WARNING, ERROR, CRITICAL
 from os import path
 from pathlib import Path
 from re import sub
-#from diagrams import Diagram, Edge
-#from diagrams.aws.network import DirectConnect
-#from diagrams.aws.compute import EC2
+from subprocess import run
+from sys import _getframe
+from time import sleep
+import paho.mqtt.client as mqtt
 
 LogFile=path.join(path.dirname(path.realpath(__file__)), path.splitext(path.basename(__file__))[0]+'.log')
 LogLevel=DEBUG #.DEBUG .INFO .WARNING .ERROR .CRITICAL
+CLEAN_SESSION=True
+MainSleep=60
+QOS=0
 
 def AvailableNetworkInterfaces():
     DefName=_getframe( ).f_code.co_name
     CommandArguments=[IpPath, "a"]
     logger.debug(DefName+'(): CommandArguments='+str(CommandArguments))
-    CommandExecution=subprocess.run(CommandArguments, capture_output=True, text=True)
+    CommandExecution=run(CommandArguments, capture_output=True, text=True)
     StdOut=CommandExecution.stdout.strip()
     StdError=CommandExecution.stderr.strip()
     if StdError != '':
@@ -42,10 +48,174 @@ def AvailableNetworkInterfaces():
     logger.debug(DefName+'(): Interfaces='+str(Interfaces))
     return Interfaces
 
+def DrawConnections(Elements):
+    DefName=_getframe( ).f_code.co_name
+    with Diagram("PLC-Flow-DNS-CCO", show=False):
+        #CCO CentralNode drawed as ELB
+        CentralNode=''
+        for Element in Elements:
+            if Element['type']=='CCO':
+                CentralNode = ELB(Element['sensor_name'])
+                logger.debug(DefName+'(): Setting '+Element['sensor_name']+' as central node.')
+        if CentralNode=='':
+            logger.critical(DefName+'(): No central node.')
+            exit(1)
+
+        StoppedNodeCount=0
+        with Cluster("Sttoped"):
+            for Element in Elements:
+                if Element['type']!='CCO':
+                    if Element['status']=='off':
+                        globals()['StoppedNode'+str(StoppedNodeCount)]=EC2(Element['sensor_name'])
+                        logger.debug(DefName+'(): Setting StoppedNode'+str(StoppedNodeCount)+' with '+Element['sensor_name']+' as normal node inside Sttoped nodes.')
+                        StoppedNodeCount+=1
+
+        if StoppedNodeCount != 0:
+            StoppedNodeCount-=1
+            while StoppedNodeCount >= 0:
+                CentralNode >> globals()['StoppedNode'+str(StoppedNodeCount)]
+                logger.debug(DefName+'(): Drawing line beteween CentralNode and StoppedNode'+str(StoppedNodeCount))
+                StoppedNodeCount-=1
+
+        for Element in Elements:
+            if Element['type']!='CCO':
+                if Element['status']=='on':
+                    CentralNode >> Edge(label=str(Element['tx'])+'/'+str(Element['rx'])) >> EC2(Element['sensor_name'])
+
+def GetElementsFromConfig(Elements):
+    DefName=_getframe( ).f_code.co_name
+    for DNS in DNSs:
+        DNSActive=False
+        for Element in Elements:
+            if DNS['mac'] == Element['mac']:
+                DNSActive=True
+        if not DNSActive:
+            Element={}
+            Element['mac']=DNS['mac']
+            Element['sensor_name']=NameFromMac(Element['mac'])
+            Element['role']='Unknown'
+            Element['sw_version']='Unknown'
+            Element['hw_version']='Unknown'
+            Element['tx']=0
+            Element['rx']=0
+            Element['status']='off'
+            logger.debug(DefName+'(): Element from DNS='+str(Element))
+            Elements.append(Element)
+    return Elements
+
+def GetElementsFromPLCStats(InforFromPLCStat):
+    DefName=_getframe( ).f_code.co_name
+    Elements=[]
+    for Line in InforFromPLCStat.splitlines():
+        if 'P/L NET TEI ------ MAC ------ ------ BDA ------  TX  RX CHIPSET FIRMWARE' not in Line:
+            Components=' '.join(Line.split()).split(' ')
+            #logger.debug(DefName+'(): Components='+str(Components))
+            Element={}
+            Element['mac']=Components[3]
+            Element['sensor_name']=NameFromMac(Element['mac'])    
+            Element['role']=Components[1]
+            try:
+                Element['sw_version']=Components[8]
+            except:
+                Element['sw_version']='Unknown'
+            try:
+                Element['hw_version']=Components[7]
+            except:
+                Element['hw_version']='Unknown'
+            if Components[5] == 'n/a':
+                Element['tx']=0
+            else:
+                Element['tx']=int(Components[5])
+            if Components[6] == 'n/a':
+                Element['rx']=0
+            else:
+                Element['rx']=int(Components[6])
+            if Element['sw_version']=='Unknown' and Element['hw_version']=='Unknown':
+                Element['status']='off'   
+            else:
+                Element['status']='on'   
+            logger.debug(DefName+'(): Element from OS='+str(Element))
+            Elements.append(Element)
+    return Elements
+
+def GetInfoFromPLCStat():
+    DefName=_getframe( ).f_code.co_name
+    CommandArguments=[PlcStatPath, "-t", '-i', Interface]
+    logger.debug(DefName+'(): CommandArguments='+str(CommandArguments))
+    CommandExecution=run(CommandArguments, capture_output=True, text=True)
+    StdOut=CommandExecution.stdout.strip()
+    StdError=CommandExecution.stderr.strip()
+    if StdError != '':
+        logger.debug(DefName+'(): StdError=\n'+str(StdError))
+        exit(1)
+    return StdOut
+
+def GetPayLoadData(Element):
+    PayLoadData={
+        "rx":int(Element['rx']),
+        "tx":int(Element['rx']),
+        "role":Element['role']
+    }
+    return PayLoadData
+
+def GetPayLoadDeviceAndTx(Element):
+    DefName=_getframe( ).f_code.co_name
+    PayLoadDeviceAndTx={
+        "name": "Tx",
+        "device_class":"data_rate",
+        "state_topic":"homeassistant/sensor/"+Element['sensor_name']+"/state",
+        "unit_of_measurement":"MB/s",
+        "value_template":"{{ value_json.tx }}",
+        "unique_id": "PLC_"+str(Element['mac']).replace(':','')+"_tx",
+        "icon": "mdi:transmission-tower-import",
+        "device":{
+            "identifiers": [ "PLC_"+str(Element['mac']).replace(':','') ],
+            "name": Element['sensor_name'],
+            "serial_number": str(Element['mac']).replace(':',''),
+            "hw_version": Element['hw_version'],
+            "sw_version": Element['sw_version'],
+            "configuration_url": "https://github.com/urri34/MyPLCNetwork",
+            "manufacturer": "plcstat",
+            "model": "MyPLCNetwork"
+        }
+    }
+    return PayLoadDeviceAndTx
+
+def GetPayLoadRole(Element):
+    PayLoadRole={
+        "name": "Role",
+        "device_class":"enum",
+        "state_topic":"homeassistant/sensor/"+Element['sensor_name']+"/state",
+        "value_template":"{{ value_json.role }}",
+        "unique_id": "PLC_"+str(Element['mac']).replace(':','')+"_role",
+        "options": ["CCO", "STA", "Unknown"],
+        "device":{
+            "identifiers":[ "PLC_"+str(Element['mac']).replace(':','') ]
+        }
+    }
+    return PayLoadRole
+
+def GetPayLoadRx(Element):
+    DefName=_getframe( ).f_code.co_name
+    PayLoadRx={
+        "name": "Rx",
+        "device_class":"data_rate",
+        "state_topic":"homeassistant/sensor/"+Element['sensor_name']+"/state",
+        "unit_of_measurement":"MB/s",
+        "value_template":"{{ value_json.rx }}",
+        "unique_id": "PLC_"+str(Element['mac']).replace(':','')+"_rx",
+        "icon": "mdi:transmission-tower-export",
+        "device":{
+            "identifiers":[ "PLC_"+str(Element['mac']).replace(':','') ]
+        }
+    }
+    return PayLoadRx
+
 def LoadVarsFromIni():
     DefName=_getframe( ).f_code.co_name
-    global Interface, IpPath, PlcStatPath, DNSs
-    Config = configparser.ConfigParser()
+    global Interface, IpPath, PlcStatPath, DNSs, Broker, Port, UserName, Password
+    Config = ConfigParser()
+
     IniFile=path.splitext(path.basename(__file__))[0]+'.ini'
     if not path.isfile(IniFile):
         logger.critical(DefName+'(): No '+IniFile)
@@ -53,8 +223,9 @@ def LoadVarsFromIni():
     try:
         Config.read(IniFile)
     except:
-        logger.critical(DefName+'(): Nota valid ini file '+IniFile)
-        exit(1) 
+        logger.critical(DefName+'(): Not a valid ini file '+IniFile)
+        exit(1)
+    #IP
     if Config.has_option('Constants', 'ip'):
         IpPath=Config.get('Constants', 'ip')
     else:
@@ -65,6 +236,7 @@ def LoadVarsFromIni():
         exit(1)
     else:
         logger.debug(DefName+'(): IpPath='+str(IpPath))
+    #Interface
     if Config.has_option('Constants', 'interface'):
         Interface=Config.get('Constants', 'interface')
     else:
@@ -76,6 +248,7 @@ def LoadVarsFromIni():
         exit(1)
     else:
         logger.debug(DefName+'(): Interface='+str(Interface))
+    #PlcStat
     if Config.has_option('Constants', 'plcstat'):
         PlcStatPath=Config.get('Constants', 'plcstat')
     else:
@@ -86,6 +259,39 @@ def LoadVarsFromIni():
         exit(1)
     else:
         logger.debug(DefName+'(): PlcStatPath='+str(PlcStatPath))
+    #Broker
+    if Config.has_option('Constants', 'broker'):
+        Broker=Config.get('Constants', 'broker')
+        logger.debug(DefName+'(): Broker='+str(Broker))
+    else:
+        logger.critical(DefName+'(): No broker set in '+IniFile)
+        exit(1)
+    #Port
+    if Config.has_option('Constants', 'port'):
+        Port=Config.get('Constants', 'port')
+    else:
+        logger.critical(DefName+'(): No port set in '+IniFile)
+        exit(1)
+    try:
+        Port=int(Port)
+        logger.debug(DefName+'(): Port='+str(Port))
+    except:
+        logger.critical(DefName+'(): Configured port is not valid')
+        exit(1)        
+    #UserName
+    if Config.has_option('Constants', 'username'):
+        UserName=Config.get('Constants', 'username')
+        logger.debug(DefName+'(): UserName='+str(UserName))
+    else:
+        logger.critical(DefName+'(): No username set in '+IniFile)
+        exit(1)
+    #Password
+    if Config.has_option('Constants', 'password'):
+        Password=Config.get('Constants', 'password')
+        logger.debug(DefName+'(): Password='+str(Password))
+    else:
+        logger.critical(DefName+'(): No password set in '+IniFile)
+        exit(1)
     DNSs=[]
     DNSNumber=1
     while True:
@@ -94,7 +300,7 @@ def LoadVarsFromIni():
         Model=''
         Location=''
         if Config.has_option('DNS'+str(DNSNumber), 'mac'):
-            Mac=Config.get('DNS'+str(DNSNumber), 'mac')
+            Mac=Config.get('DNS'+str(DNSNumber), 'mac').upper()
             #logger.debug(DefName+'(): [DNS'+str(DNSNumber)+'].mac='+str(Mac))
             if Config.has_option('DNS'+str(DNSNumber), 'name'):
                 Name=Config.get('DNS'+str(DNSNumber), 'name')
@@ -125,56 +331,41 @@ def LoadVarsFromIni():
             DNSNumber=DNSNumber+1
         else:
             break
-    logger.info(DefName+'(): Vars from ini loaded.')
+
+def NameFromMac(MAC):
+    for DNS in DNSs:
+        if DNS['mac']==MAC:
+            return sub(r'[^a-zA-Z0-9\-_]', '', DNS['name'])
+    return MAC
+
+def SendPayLoadToMQTTTopic(PayLoad, Topic, client):
+    DefName=_getframe( ).f_code.co_name
+    logger.debug(DefName+'(): PayLoad='+dumps(PayLoad, indent=1))
+    logger.debug(DefName+'(): Topic='+str(Topic))
+    logger.debug(DefName+'(): Return:'+str(client.publish(Topic,
+                                    dumps(PayLoad),
+                                    QOS)))
 
 def SetMyLogger():
+    from logging import getLogger, Formatter, StreamHandler
+    from logging.handlers import RotatingFileHandler
+
     logger = getLogger()
     logger.setLevel(LogLevel)
-    formatter = Formatter("[{asctime}] {levelname} {message}", style="{")
+    LogFormat = ('[%(asctime)s] %(levelname)-4s %(message)s')
+    formatter = Formatter(LogFormat)
 
-    file_handler = FileHandler(LogFile, mode="a", encoding="utf-8")
+    file_handler = RotatingFileHandler(LogFile, mode="a", encoding="utf-8", maxBytes=1*1024*1024, backupCount=2)
     file_handler.setLevel(LogLevel)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
-    stderr_log_handler = StreamHandler()
-    stderr_log_handler.setLevel(LogLevel)
-    stderr_log_handler.setFormatter(formatter)       
-    logger.addHandler(stderr_log_handler)
+    stdout_handler = StreamHandler()
+    stdout_handler.setLevel(LogLevel)
+    stdout_handler.setFormatter(formatter)       
+    logger.addHandler(stdout_handler)
+
     return logger
-
-def NameFromMac(MAC):
-    for DNS in DNSs:
-        if str(DNS['mac']).upper()==MAC:
-            return DNS['name']
-    return MAC
-
-def AreaFromMac(MAC):
-    for DNS in DNSs:
-        if str(DNS['mac']).upper()==MAC:
-            return DNS['location']
-    return ''
-
-def ModelFromMac(MAC):
-    for DNS in DNSs:
-        if str(DNS['mac']).upper()==MAC:
-            return DNS['model']
-    return 'Unkown'
-
-def BuildConnectionsMatrixWithDNS(MyCCOMAC, Stations):
-    Connections=[]
-    for Station in Stations:
-        MAC=Station[0]
-        TX=Station[1]
-        RX=Station[2]
-        Connections.append([MACDNS(MyCCOMAC), MACDNS(MAC), TX, RX])
-    return Connections
-
-def DrawConnectionsWithDNS(MyCCOMAC, Connections):
-    with Diagram("PLC-Flow-DNS-CCO", show=False):
-        CentralNode = DirectConnect(MACDNS(MyCCOMAC))
-        for Connection in Connections:
-            CentralNode >> Edge(label=Connection[2]+'/'+Connection[3]) >> EC2(Connection[1])
 
 def main():
     DefName=_getframe( ).f_code.co_name
@@ -182,132 +373,50 @@ def main():
     logger = SetMyLogger()
     logger.debug(DefName+'(): Logging active for me: '+str(Path(__file__).stem))
 
+    logger.info(DefName+'(): Loading vars from ini file ...')
     LoadVarsFromIni()
-    CommandArguments=[PlcStatPath, "-t", '-i', Interface]
-    logger.debug(DefName+'(): CommandArguments='+str(CommandArguments))
-    CommandExecution=subprocess.run(CommandArguments, capture_output=True, text=True)
-    StdOut=CommandExecution.stdout.strip()
-    StdError=CommandExecution.stderr.strip()
-    if StdError != '':
-        logger.debug(DefName+'(): StdError=\n'+str(StdError))
-        exit(1)
     
-    #P/L NET TEI ------ MAC ------ ------ BDA ------  TX  RX CHIPSET FIRMWARE
-    #LOC CCO 004 30:D3:2D:5E:3E:85 08:00:27:92:46:68 n/a n/a QCA7420 MAC-QCA7420-1.1.1.1193-03-20140207-CS
-    #REM STA 002 30:D3:2D:5E:3C:24 F6:A2:00:00:4F:02 218 263 QCA7420 MAC-QCA7420-1.1.1.1193-03-20140207-CS
-    #REM STA 005 B8:BE:F4:7F:F0:5D B8:27:EB:AE:6C:3C 149 148 QCA7420 MAC-QCA7420-1.3.0.2134-00-20151212-CS
+    logger.info(DefName+'(): Connecting to MQTT ...')
+    #client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, "python-mqtt", clean_session=CLEAN_SESSION)
+    client = mqtt.Client("python-mqtt", clean_session=CLEAN_SESSION)
+    client.username_pw_set(UserName, Password)
+    client.connect(Broker, Port)
+    client.loop_start()
+    
+    while True:
+        InforFromPLCStat=GetInfoFromPLCStat()
+        logger.info(DefName+'(): Loading elements from plcstat ...')
+        Elements=GetElementsFromPLCStats(InforFromPLCStat)
 
-    logger.debug(DefName+'(): Loading elements from os ...')
-    Elements=[]
-    for Line in StdOut.splitlines():
-        if 'P/L NET TEI ------ MAC ------ ------ BDA ------  TX  RX CHIPSET FIRMWARE' not in Line:
-            Components=' '.join(Line.split()).split(' ')
-            #logger.debug(DefName+'(): Components='+str(Components))
-            Element={}
-            Element['mac']=Components[3]
-            Element['sensor_name']=sub(r'[^a-zA-Z0-9\s]', '', NameFromMac(Element['mac']))         
-            Element['type']=Components[1]
-            Element['friendly_name']=NameFromMac(Element['mac'])
-            try:
-                Element['sw_version']=Components[8]
-            except:
-                Element['sw_version']='Unknown'
-            try:
-                Element['hw_version']=Components[7]
-            except:
-                Element['hw_version']='Unknown'
-            Element['suggested_area']=AreaFromMac(Element['mac'])
-            Element['model']=ModelFromMac(Element['mac'])
-            if Components[5] == 'n/a':
-                Element['tx']=0
-            else:
-                Element['tx']=int(Components[5])
-            if Components[6] == 'n/a':
-                Element['rx']=0
-            else:
-                Element['rx']=int(Components[6])
-            if Element['sw_version']=='Unknown' and Element['hw_version']=='Unknown':
-                Element['status']='off'   
-            else:
-                Element['status']='on'   
-            logger.debug(DefName+'(): Element from OS='+str(Element))
-            Elements.append(Element)
+        logger.info(DefName+'(): Loading elements from config ...')
+        Elements=GetElementsFromConfig(Elements)
 
-    logger.debug(DefName+'(): Loading elements from config ...')
-    for DNS in DNSs:
-        DNSActive=False
+        #logger.info(DefName+'(): Drawing connections ...')
+        #DrawConnections(Elements)
+
         for Element in Elements:
-            if str(DNS['mac']).upper() == Element['mac']:
-                DNSActive=True
-        if not DNSActive:
-            Element={}
-            Element['mac']=DNS['mac'].upper()
-            Element['sensor_name']=sub(r'[^a-zA-Z0-9\s]', '', NameFromMac(Element['mac']))
-            Element['type']='Unknown'
-            Element['friendly_name']=NameFromMac(Element['mac'])
-            Element['sw_version']='Unknown'
-            Element['hw_version']='Unknown'
-            Element['suggested_area']=AreaFromMac(Element['mac'])
-            Element['model']=ModelFromMac(Element['mac'])
-            Element['tx']=0
-            Element['rx']=0
-            Element['status']='off'
-            logger.debug(DefName+'(): Element from DNS='+str(Element))
-            Elements.append(Element)
+            if False:
+                PayLoadDeviceAndTx=GetPayLoadDeviceAndTx(Element)
+                Topic="homeassistant/sensor/"+Element['sensor_name']+"/tx/config"
+                SendPayLoadToMQTTTopic(PayLoadDeviceAndTx, Topic, client)
+                del(PayLoadDeviceAndTx)
 
-    """
-        payload={"unique_id": Element['sensor_name'],
-            "name": Element['friendly_name'],
-            "state_topic": "home/PLC/"+Element['sensor_name'],
-            "command_topic": "home/bedroom/bedroom_socket_switch/set",
-            "availability_topic":"home/bedroom/bedroom_socket_switch/available",
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "state_on": "ON",
-            "state_off": "OFF",
-            "optimistic": False,
-            "qos": 0,
-            "retain": True
-        }
-        payload=json.dumps(payload) #convert to JSON
+                PayLoadRx=GetPayLoadRx(Element)
+                Topic="homeassistant/sensor/"+Element['sensor_name']+"/rx/config"
+                SendPayLoadToMQTTTopic(PayLoadRx, Topic, client)
+                del(PayLoadRx)
 
+                PayLoadRole=GetPayLoadRole(Element)
+                Topic="homeassistant/sensor/"+Element['sensor_name']+"/role/config"
+                SendPayLoadToMQTTTopic(PayLoadRole, Topic, client)
+                del(PayLoadRole)
+            else:
+                PayLoadData=GetPayLoadData(Element)
+                Topic="homeassistant/sensor/"+Element['sensor_name']+"/state"
+                SendPayLoadToMQTTTopic(PayLoadData, Topic, client)
+                del(PayLoadData)
 
-    # Create the JSON payload for MQTT Discovery configuration
-    json_payload=$(jq -n --arg sensor_name "$sensor_name" --arg status "$status" --arg type "$type" --arg friendly_name "$friendly_name" \
-       '{"name": "Devolo '$friendly_name'",
-         "state_topic": "homeassistant/sensor/'$sensor_name'/state",
-         "unique_id": "'$sensor_name'",
-         "device": {"identifiers": ["'$mac'"],
-                    "name": "'$friendly_name'",
-                    "model": "dLAN 550 duo+",
-                    "manufacturer": "Devolo"
-                   },
-         "json_attributes_topic": "homeassistant/sensor/'$sensor_name'/attributes",
-         "json_attributes_template": "{{ value_json.data.value | tojson }}"
-       }')
-
-    # Publish the MQTT Discovery configuration to the appropriate topic
-    mosquitto_pub -h localhost -u $mqtt_username -P $mqtt_password -t homeassistant/sensor/$sensor_name/config -m "$json_payload"
-
-    # Publish the sensor state to the MQTT state topic
-    mosquitto_pub -h localhost -u $mqtt_username -P $mqtt_password -t homeassistant/sensor/$sensor_name/state -m "$status"
-
-    # Publish the sensor attributes to the MQTT attribute topic
-    json_attribute="{ \"mac\": \"$mac\", \"type\": \"$type\""
-
-    # Check if tx is a numeric value
-    if [[ $tx =~ ^[0-9]+$ ]]; then
-        json_attribute="$json_attribute, \"tx\": $tx"
-    fi
-
-    # Check if rx is a numeric value
-    if [[ $rx =~ ^[0-9]+$ ]]; then
-        json_attribute="$json_attribute, \"rx\": $rx"
-    fi
-
-    json_attribute="$json_attribute }"
-    mosquitto_pub -h localhost -u $mqtt_username -P $mqtt_password -t homeassistant/sensor/$sensor_name/attributes -m "$json_attribute"
-    """
-
+        sleep(MainSleep)
+        
 if __name__ == '__main__':
     main()
