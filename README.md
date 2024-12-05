@@ -1,48 +1,18 @@
-```
-Elements=[
-  { 'mac': '30:D3:2D:5E:3E:85',
-    'sensor_name': 'PLCSaleta',
-    'type': 'CCO',
-    'friendly_name': 'PLC_Saleta',
-    'sw_version': 'MAC-QCA7420-1.1.1.1193-03-20140207-CS',
-    'hw_version': 'QCA7420',
-    'suggested_area': 'sala_d_estar',
-    'model': 'Devolo550p',
-    'tx': 0,
-    'rx': 0,
-    'status': 'on'},
-  { 'mac': 'B8:BE:F4:7F:F0:5D',
-    'sensor_name': 'PLCTest',
-    'type': 'STA',
-    'friendly_name': 'PLC_Test',
-    'sw_version': 'MAC-QCA7420-1.3.0.2134-00-20151212-CS',
-    'hw_version': 'QCA7420',
-    'suggested_area': 'Development',
-    'model': 'Devolo550p',
-    'tx': 160,
-    'rx': 143,
-    'status': 'on'},
-  { 'mac': 'B8:BE:F4:2B:06:F6',
-    'sensor_name': 'PLCWC1',
-    'type': 'Unknown',
-    'friendly_name': 'PLC_WC1',
-    'sw_version': 'Unknown',
-    'hw_version': 'Unknown',
-    'suggested_area': 'wc_primera',
-    'model': 'Devolo550p',
-    'tx': 0,
-    'rx': 0,
-    'status': 'off'},
-  { 'mac': '30:D3:2D:5E:3C:24',
-    'sensor_name': 'PLCDorm',
-    'type': 'Unknown',
-    'friendly_name': 'PLC_Dorm',
-    'sw_version': 'Unknown',
-    'hw_version': 'Unknown',
-    'suggested_area': 'dormitori',
-    'model': 'Devolo550p',
-    'tx': 0,
-    'rx': 0,
-    'status': 'off'}
-]
-```
+# MyPLCNetwork
+
+Contains the python scripts I use to save to monitor the bandwith in my PLC network.
+
+## MyPLCNwtwork.py:
+### Idea behind:
+
+I have a PLC network at home to move data specially coming from my cameras, that I dont want to be send thru wifi (beacuse I'm old enough to think that if data can go thru wired it's allways better than thru wireless connections). And I want everything to be inside my HA, as usual.
+
+[plc-utils]([https://github.com/hass-agent/HASS.Agent](https://github.com/qca/open-plc-utils)) is the key to monitor our PLCs (because remember they dont even have an ip!), but dont worry, you dont even need to open that webpage.
+
+### HW and phisycal dependencies:
+
+This script can not be run anywhere, it has some phisical restrictions. 
+
+### Execution parameters:
+
+You can configure all the necessary things thru the ini file:
