@@ -1,6 +1,6 @@
 # MyPLCNetwork
 
-Contains the python scripts I use to save to monitor the bandwidth in my PLC network. One day it will be and addon for HA ... one day ...
+Contains the python scripts I use to save to monitor the bandwidth in my PLC network. This is tha base of my addon plc_network.
 
 It reads info from the PLC network and sends it to MQTT broker which auto generates devices in HA. That easy!
 
